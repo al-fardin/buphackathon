@@ -1,0 +1,39 @@
+{
+  "cases": [
+    {
+      "note": "Solar output reduced by 50% from 12 PM to 2 PM",
+      "type": "solar_reduction",
+      "adjustment": {"hours": [12, 13], "factor": 0.5}
+    },
+    {
+      "note": "Reduce solar by 40% at noon",
+      "type": "solar_reduction",
+      "adjustment": {"hours": [12], "factor": 0.6}
+    },
+    {
+      "note": "Battery charge bondho rakho 6 PM theke 8 PM",
+      "type": "no_charge_window",
+      "adjustment": {"hours": [18, 19]}
+    },
+    {
+      "note": "সন্ধ্যার সময় battery reserve maintain korte hobe at least 100 kWh",
+      "type": "minimum_battery_reserve",
+      "adjustment": {"hours": [18, 19, 20], "minimum_energy_kwh": 100.0}
+    },
+    {
+      "note": "Do not discharge the battery from 5 PM until 7 PM during relay testing.",
+      "type": "no_discharge_window",
+      "adjustment": {"hours": [17, 18]}
+    },
+    {
+      "note": "Grid intake must stay at or below 190 kWh from 7 PM until 10 PM.",
+      "type": "max_grid_window",
+      "adjustment": {"hours": [19, 20, 21], "max_grid_kwh": 190.0}
+    },
+    {
+      "note": "The cafeteria menu changes tomorrow.",
+      "type": "no_op",
+      "adjustment": null
+    }
+  ]
+}
