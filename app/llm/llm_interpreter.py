@@ -15,20 +15,55 @@ from app.models.schemas import BatteryInput, DirectiveInterpretation
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You interpret one smart-grid operator note. Return JSON only with keys:
-directive_type, structured_adjustment, explanation. Allowed directive_type values:
+directive_type, hours, factor, minimum_energy_kwh, max_grid_kwh, explanation.
+Allowed directive_type values:
 solar_reduction, minimum_battery_reserve, no_charge_window, no_discharge_window,
 max_grid_window, no_op. Time windows are start-inclusive/end-exclusive. Hours are
 sorted integers 0-23. solar_reduction factor is the fraction remaining, not the
-fraction lost. no_op must have null adjustment. Other adjustment shapes are:
-solar_reduction {hours,factor}; minimum_battery_reserve {hours,minimum_energy_kwh};
-no_charge_window/no_discharge_window {hours}; max_grid_window {hours,max_grid_kwh}.
+fraction lost. For no_op use hours=[] and all numeric fields=0. For every other
+directive, set only its relevant numeric field and set unused numeric fields=0.
 Understand English, Bangla, Banglish, and mixed language. Never invent values."""
+
+
+MODEL_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "directive_type": {
+            "type": "string",
+            "enum": [
+                "solar_reduction",
+                "minimum_battery_reserve",
+                "no_charge_window",
+                "no_discharge_window",
+                "max_grid_window",
+                "no_op",
+            ],
+        },
+        "hours": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+        "factor": {"type": "number"},
+        "minimum_energy_kwh": {"type": "number"},
+        "max_grid_kwh": {"type": "number"},
+        "explanation": {"type": "string"},
+    },
+    "required": [
+        "directive_type",
+        "hours",
+        "factor",
+        "minimum_energy_kwh",
+        "max_grid_kwh",
+        "explanation",
+    ],
+    "additionalProperties": False,
+}
 
 
 class LLMDirectiveInterpreter:
     def __init__(self) -> None:
         self.provider = os.getenv("LLM_PROVIDER", "auto").lower()
-        self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "8"))
+        self.timeout = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
         self.openai_key = os.getenv("OPENAI_API_KEY", "")
         self.openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
         self.openai_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -62,22 +97,83 @@ class LLMDirectiveInterpreter:
 
     def _openai(self, note: str, battery: BatteryInput) -> dict[str, Any]:
         payload = {
-            "model": self.openai_model, "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps({
-                    "note": note, "battery_capacity_kwh": battery.capacity_kwh
-                }, ensure_ascii=False)},
+            "model": self.openai_model,
+            "store": False,
+            "reasoning": {"effort": "low"},
+            "input": [
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": json.dumps({
+                            "note": note,
+                            "battery_capacity_kwh": battery.capacity_kwh,
+                        }, ensure_ascii=False),
+                    }],
+                },
             ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "gridwise_directive",
+                    "strict": True,
+                    "schema": MODEL_OUTPUT_SCHEMA,
+                }
+            },
+            "max_output_tokens": 1000,
         }
         request = urllib.request.Request(
-            f"{self.openai_url}/chat/completions", data=json.dumps(payload).encode(),
+            f"{self.openai_url}/responses", data=json.dumps(payload).encode(),
             headers={"Authorization": f"Bearer {self.openai_key}", "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            data = json.load(response)
-        return json.loads(data["choices"][0]["message"]["content"])
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.load(response)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            logger.error("OpenAI Responses API returned HTTP %s: %s", exc.code, body[:1000])
+            raise
+
+        raw = json.loads(self._extract_output_text(data))
+        kind = raw["directive_type"]
+        if kind == "no_op":
+            adjustment = None
+        elif kind == "solar_reduction":
+            adjustment = {"hours": raw["hours"], "factor": raw["factor"]}
+        elif kind == "minimum_battery_reserve":
+            adjustment = {
+                "hours": raw["hours"],
+                "minimum_energy_kwh": raw["minimum_energy_kwh"],
+            }
+        elif kind == "max_grid_window":
+            adjustment = {"hours": raw["hours"], "max_grid_kwh": raw["max_grid_kwh"]}
+        else:
+            adjustment = {"hours": raw["hours"]}
+        return {
+            "directive_type": kind,
+            "structured_adjustment": adjustment,
+            "explanation": raw["explanation"],
+        }
+
+    @staticmethod
+    def _extract_output_text(data: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for item in data.get("output", []):
+            if not isinstance(item, dict):
+                continue
+            for content in item.get("content", []):
+                if isinstance(content, dict) and content.get("type") == "output_text":
+                    text = content.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+        output_text = "".join(parts).strip()
+        if not output_text:
+            raise ValueError("OpenAI response did not contain output_text")
+        return output_text
 
     def _ollama(self, note: str, battery: BatteryInput) -> dict[str, Any]:
         payload = {"model": self.ollama_model, "stream": False, "format": "json",
