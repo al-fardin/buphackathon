@@ -207,3 +207,6 @@ docker run --rm -p 8000:8000 --env-file .env fardinbhaiye/gridwise-ai:final
 Health verification:
 curl http://localhost:8000/health
 
+
+Immutable Docker image digest:
+fardinbhaiye/gridwise-ai@sha256:139bc607ae7df0008f67a04cd5c585d2f8a8ef40119648bf6326995cfd6b0e42
