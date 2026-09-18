@@ -184,3 +184,26 @@ FastAPI/Pydantic provide the API and schema layer. SciPy HiGHS solves the linear
 ## Contract mode
 
 The canonical challenge contract requires exactly one interpretation entry per operator note, so `ALLOW_MULTIPLE_DIRECTIVES_PER_NOTE=false` is the safe submission default. Custom test packs that explicitly expect several entries with the same `note_index` can use `ALLOW_MULTIPLE_DIRECTIVES_PER_NOTE=true`; the clause-aware interpreter then preserves directive order and applies all extracted hard constraints.
+
+## Live Deployment
+
+Base URL:
+https://buphackathon-bc7p.onrender.com
+
+Health endpoint:
+GET https://buphackathon-bc7p.onrender.com/health
+
+Optimization endpoint:
+POST https://buphackathon-bc7p.onrender.com/optimize-energy
+
+## Published Docker Image
+
+Pull image:
+docker pull fardinbhaiye/gridwise-ai:final
+
+Run using a local .env file:
+docker run --rm -p 8000:8000 --env-file .env fardinbhaiye/gridwise-ai:final
+
+Health verification:
+curl http://localhost:8000/health
+
