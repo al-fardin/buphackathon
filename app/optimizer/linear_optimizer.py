@@ -12,15 +12,13 @@ class OptimizationError(RuntimeError):
 
 
 def optimize_schedule(scenario: ScenarioInput, constraints: HourConstraints) -> list[HourlyPlan]:
-    # Variable blocks: grid, solar-used, charge, discharge, battery-energy-after.
+    # Variable blocks: grid, solar-used, charge, discharge, battery-energy-after,
+    # and a scalar peak-grid variable. Objectives are solved lexicographically:
+    # cost -> peak -> total grid -> battery throughput.
     size = 24
     grid, solar, charge, discharge, energy = (0, size, 2*size, 3*size, 4*size)
-    n = 5*size
-    objective = np.zeros(n)
-    objective[grid:grid+size] = [h.tariff_bdt_per_kwh for h in scenario.hours]
-    # Tie-break equivalent cost optima toward fewer battery cycles.
-    objective[charge:charge+size] = 1e-8
-    objective[discharge:discharge+size] = 1e-8
+    peak = 5*size
+    n = peak+1
 
     equalities: list[np.ndarray] = []
     targets: list[float] = []
@@ -61,11 +59,73 @@ def optimize_schedule(scenario: ScenarioInput, constraints: HourConstraints) -> 
         bounds.append((0, battery.max_discharge_kwh_per_hour if constraints.can_discharge[hour] else 0))
     for hour in range(size):
         bounds.append((constraints.minimum_energy[hour], battery.capacity_kwh))
+    bounds.append((0, None))
 
-    result = linprog(objective, A_eq=np.asarray(equalities), b_eq=np.asarray(targets),
-                     bounds=bounds, method="highs", options={"presolve": True})
-    if not result.success:
-        raise OptimizationError(f"No feasible energy schedule: {result.message}")
+    # Every hourly grid import must be no larger than the peak variable.
+    base_inequalities: list[np.ndarray] = []
+    base_limits: list[float] = []
+    for hour in range(size):
+        row = np.zeros(n)
+        row[grid+hour] = 1
+        row[peak] = -1
+        base_inequalities.append(row)
+        base_limits.append(0)
+
+    equality_matrix = np.asarray(equalities)
+    equality_targets = np.asarray(targets)
+
+    def solve(objective: np.ndarray, extra_rows: list[np.ndarray] | None = None,
+              extra_limits: list[float] | None = None):
+        rows = base_inequalities+list(extra_rows or [])
+        limits = base_limits+list(extra_limits or [])
+        result = linprog(
+            objective,
+            A_ub=np.asarray(rows),
+            b_ub=np.asarray(limits),
+            A_eq=equality_matrix,
+            b_eq=equality_targets,
+            bounds=bounds,
+            method="highs",
+            options={"presolve": True},
+        )
+        if not result.success:
+            raise OptimizationError(f"No feasible energy schedule: {result.message}")
+        return result
+
+    cost_row = np.zeros(n)
+    cost_row[grid:grid+size] = [h.tariff_bdt_per_kwh for h in scenario.hours]
+
+    # Stage 1: globally minimum bill.
+    cost_result = solve(cost_row)
+    minimum_cost = float(cost_row@cost_result.x)
+    cost_limit = minimum_cost+_lex_tolerance(minimum_cost)
+
+    # Stage 2: preserve the minimum bill and shave the maximum grid draw.
+    peak_objective = np.zeros(n)
+    peak_objective[peak] = 1
+    peak_result = solve(peak_objective, [cost_row], [cost_limit])
+    minimum_peak = float(peak_result.x[peak])
+
+    peak_row = np.zeros(n)
+    peak_row[peak] = 1
+    locked_rows = [cost_row, peak_row]
+    locked_limits = [cost_limit, minimum_peak+_lex_tolerance(minimum_peak)]
+
+    # Stage 3: among cost/peak-equivalent plans, minimize total grid energy.
+    grid_objective = np.zeros(n)
+    grid_objective[grid:grid+size] = 1
+    grid_result = solve(grid_objective, locked_rows, locked_limits)
+    minimum_grid = float(grid_objective@grid_result.x)
+
+    # Stage 4: avoid charge/discharge cycles without sacrificing prior goals.
+    throughput_objective = np.zeros(n)
+    throughput_objective[charge:charge+size] = 1
+    throughput_objective[discharge:discharge+size] = 1
+    result = solve(
+        throughput_objective,
+        locked_rows+[grid_objective],
+        locked_limits+[minimum_grid+_lex_tolerance(minimum_grid)],
+    )
 
     x = result.x
     plan: list[HourlyPlan] = []
@@ -92,3 +152,8 @@ def optimize_schedule(scenario: ScenarioInput, constraints: HourConstraints) -> 
 def _clean(value: float) -> float:
     value = round(float(value), 6)
     return 0.0 if abs(value) < 1e-7 else value
+
+
+def _lex_tolerance(value: float) -> float:
+    """Numerical allowance small enough to preserve the preceding objective."""
+    return max(1e-5, abs(value)*1e-8)

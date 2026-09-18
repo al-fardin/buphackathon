@@ -37,7 +37,8 @@ async def optimize_energy(scenario: ScenarioInput) -> OptimizeResponse:
         peak_grid = round(max(row.grid_kwh for row in plan), 6)
         applied = sum(item.applies for item in directives)
         summary = (
-            f"Cost-minimal 24-hour plan using available solar and tariff-aware battery shifting; "
+            f"Lexicographically optimized 24-hour plan for cost, peak grid draw, total grid energy, "
+            f"and battery throughput using available solar and tariff-aware battery shifting; "
             f"{applied} operator directive{'s' if applied != 1 else ''} applied with end-of-day battery neutrality."
         )
         return OptimizeResponse(

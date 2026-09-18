@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app.llm.local_parser import parse_note, parse_note_all
 from app.main import app
 from app.models.schemas import BatteryInput
+from test_runner import compare_schedule_metrics
 
 
 def scenario(note: str = "The cafeteria menu changes tomorrow.") -> dict:
@@ -62,3 +63,53 @@ def test_multiple_directives() -> None:
     assert [item["directive_type"] for item in parsed] == [
         "no_charge_window", "no_discharge_window", "max_grid_window"
     ]
+
+
+def test_flat_tariff_avoids_unnecessary_cycles() -> None:
+    body = scenario()
+    for row in body["hours"]:
+        row["demand_kwh"] = 100
+        row["solar_kwh"] = 0
+        row["tariff_bdt_per_kwh"] = 10
+    response = TestClient(app).post("/optimize-energy", json=body)
+    assert response.status_code == 200, response.text
+    plan = response.json()["hourly_plan"]
+    assert all(row["battery_action"] == "idle" for row in plan)
+    assert all(abs(row["grid_kwh"]-100) <= 0.001 for row in plan)
+
+
+def test_peak_is_minimized_after_cost() -> None:
+    body = scenario()
+    for row in body["hours"]:
+        row["demand_kwh"] = 100
+        row["solar_kwh"] = 0
+        row["tariff_bdt_per_kwh"] = 10
+    body["hours"][18]["demand_kwh"] = 200
+    body["battery"] = {
+        "capacity_kwh": 200,
+        "initial_energy_kwh": 100,
+        "minimum_energy_kwh": 0,
+        "max_charge_kwh_per_hour": 100,
+        "max_discharge_kwh_per_hour": 100,
+    }
+    response = TestClient(app).post("/optimize-energy", json=body)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["peak_grid_kwh"] < 110
+    assert abs(result["total_cost_bdt"]-25000) <= 0.01
+    assert result["validation"]["valid"] is True
+
+
+def test_metric_comparison_uses_point_zero_one_tolerance() -> None:
+    case = {"expected_output": {"total_grid_kwh": 100, "total_cost_bdt": 500}}
+    row, errors = compare_schedule_metrics(
+        case, {"total_grid_kwh": 100.01, "total_cost_bdt": 499.99}
+    )
+    assert errors == []
+    assert row["metric_status"] == "passed"
+
+    row, errors = compare_schedule_metrics(
+        case, {"total_grid_kwh": 100.010001, "total_cost_bdt": 500}
+    )
+    assert errors
+    assert row["metric_status"] == "failed"

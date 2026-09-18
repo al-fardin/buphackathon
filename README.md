@@ -17,7 +17,15 @@ Operator notes
 
 The model output is untrusted. `app/llm/guardrails.py` enforces directive types, note mapping, hour ranges, adjustment shapes, and numeric bounds before any output reaches the optimizer. If a configured provider is temporarily unavailable, a multilingual deterministic parser provides a controlled availability fallback. For official judging, configure OpenAI or Ollama so a language-capable generative model remains in the interpretation path.
 
-The LP minimizes `sum(grid_kwh[h] * tariff[h])` subject to hourly energy balance, available/effective solar, battery state transitions, capacity/reserve bounds, charge/discharge rates, operator windows, grid caps, and exact end-of-day battery neutrality. A tiny cycle penalty breaks equal-cost ties and avoids unnecessary cycling.
+The LP uses four lexicographic HiGHS solves: (1) globally minimize
+`sum(grid_kwh[h] * tariff[h])`; (2) preserve that minimum bill while minimizing
+peak hourly grid draw; (3) preserve cost and peak while minimizing total grid
+energy; and (4) preserve all earlier objectives while minimizing battery
+throughput. This avoids arbitrary equal-tariff cycles without trading away a
+better bill or peak. Every stage remains subject to hourly energy balance,
+available/effective solar, battery state transitions, capacity/reserve bounds,
+charge/discharge rates, operator windows, grid caps, and exact end-of-day
+battery neutrality.
 
 ## Project layout
 
@@ -110,6 +118,14 @@ python test_runner.py
 ```
 
 It discovers JSON files in `tests/test_cases/`, supports both compact language cases and the organizer's public case-pack shape, runs 1,000 deterministic generated optimization/replay cases, and writes `test_report.json` with totals, accuracy, duration, and failure details.
+
+For every loaded JSON case, the report also includes a
+`metric_comparison_table` with expected value, optimizer output, and absolute
+difference for `total_grid_kwh` and `total_cost_bdt`. The runner writes the same
+rows to `<report-name>_metric_comparison.csv`. If an expected metric is present,
+an absolute difference greater than `0.01` fails the case; exactly `0.01` is
+accepted. Fixtures without those expected totals are explicitly marked
+`not_available` instead of receiving generated ground truth.
 
 Run unit/API tests separately:
 
